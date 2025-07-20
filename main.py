@@ -33,6 +33,7 @@ st.markdown("""
 
 st.set_page_config(page_title="Investia Sector", layout="wide")
 #st.markdown("## Industry screening - Bèta version")
+st.markdown("")
 
 # Fetch sector list as name-key dictionary
 sectors_dict = get_available_sectors()
@@ -121,7 +122,7 @@ if selected_sector_name:
                         # Checkbox for top 20 by Market Cap
                         show_top_20 = st.checkbox("Show only top 20 by Market Cap")
                         if show_top_20 and "Market Cap (M USD)" in final_df.columns:
-                            final_df = final_df.sort_values(by="Market Cap (M USD)", ascending=False).head(20)
+                            final_df = final_df.head(20)
 
                         # Checkboxes for each unique rating
                         if "Rating" in final_df.columns:
@@ -134,6 +135,11 @@ if selected_sector_name:
                                     selected_ratings.append(rating)
                             if selected_ratings:
                                 final_df = final_df[final_df["Rating"].isin(selected_ratings)]
+
+                    # Sort by Market Cap before displaying, if present
+                    if "Market Cap (M USD)" in final_df.columns:
+                        final_df = final_df.sort_values(by="Market Cap (M USD)", ascending=False)
+                        final_df = final_df.reset_index(drop=True)
 
                     st.subheader("Company Data")
 
@@ -167,8 +173,9 @@ if selected_sector_name:
 
                     st.dataframe(styler)
 
-                    # --- Export options for styled and plain Excel files ---
                     import io
+
+                    # --- Export options for styled and plain Excel files ---
                     col1, col2, _ = st.columns([2, 2, 14])
 
                     # Export styled Excel
@@ -195,6 +202,64 @@ if selected_sector_name:
                             file_name="industry_companies_plain.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
+
+                    # --- Optional Upload of Custom Ticker List ---
+                    uploaded_file = st.file_uploader("Optional: Upload custom ticker list (Excel with 1 ticker per row)", type=["xlsx"])
+
+                    if uploaded_file:
+                        try:
+                            # Read the file
+                            custom_df = pd.read_excel(uploaded_file)
+
+                            # Assume tickers are in the first column
+                            tickers = custom_df.iloc[:, 0].dropna().astype(str).unique().tolist()
+
+                            if tickers:
+                                st.success(f"{len(tickers)} custom tickers uploaded.")
+
+                                # Fetch additional data using your logic function
+                                from logic import fetch_additional_company_data
+                                uploaded_data_df = fetch_additional_company_data(pd.DataFrame({"symbol": tickers}))
+
+                                # Combine with final_df if present
+                                if 'final_df' in locals() and not final_df.empty:
+                                    combined_df = pd.concat([final_df, uploaded_data_df], ignore_index=True)
+                                else:
+                                    combined_df = uploaded_data_df
+
+                                st.subheader("Combined Data")
+                                st.dataframe(combined_df)
+
+                                # --- Export options for combined dataframe ---
+                                col3, col4, _ = st.columns([2, 2, 14])
+
+                                # Export styled Excel for combined
+                                styled_combined = combined_df.style.set_na_rep("").highlight_null(null_color="#d3d3d3").format(precision=2)
+                                styled_combined_buffer = io.BytesIO()
+                                with pd.ExcelWriter(styled_combined_buffer, engine='openpyxl') as writer:
+                                    styled_combined.to_excel(writer, sheet_name="Combined")
+                                styled_combined_buffer.seek(0)
+                                with col3:
+                                    st.download_button(
+                                        label="Formatted Excel",
+                                        data=styled_combined_buffer,
+                                        file_name="combined_companies_styled.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    )
+
+                                # Export plain Excel for combined
+                                plain_combined_buffer = io.BytesIO()
+                                combined_df.to_excel(plain_combined_buffer, index=False, engine='openpyxl')
+                                plain_combined_buffer.seek(0)
+                                with col4:
+                                    st.download_button(
+                                        label="Plain Excel",
+                                        data=plain_combined_buffer,
+                                        file_name="combined_companies_plain.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    )
+                        except Exception as e:
+                            st.error(f"Error processing uploaded file: {e}")
 
                 else:
                     st.warning("No data available for the selected industries and data method.")
