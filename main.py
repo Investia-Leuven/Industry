@@ -1,289 +1,235 @@
 import streamlit as st
-from logic import get_available_sectors, get_industries_for_sector, combine_industry_dataframes
 import pandas as pd
+from logic import get_available_sectors, get_industries_for_sector, combine_industry_dataframes, apply_final_sorting_and_formatting, fetch_additional_company_data, apply_filters, normalise_for_gradient, create_styler, generate_styled_excel, generate_plain_excel, render_download_buttons
 
-# --- Fixed Header ---
-st.markdown("""
-    <style>
-    .header {
-        position: sticky;
-        top: 0;
-        left: 0;
-        width: 100%;
-        background-color: white;
-        padding: 10px 0;
-        z-index: 1000;
-        border-bottom: 1px solid #ddd;
-        text-align: center;
-    }
-    .header span {
-        font-size: 20px;
-        font-weight: bold;
-        color: #333;
-        vertical-align: middle;
-    }
-    .block-container {
-        padding-top: 45px;
-    }
-    </style>
-    <div class="header">
-        <span>Investia - Sector screening (bèta)</span>
-    </div>
-""", unsafe_allow_html=True)
+import io
 
-st.set_page_config(page_title="Investia Sector", layout="wide")
-#st.markdown("## Industry screening - Bèta version")
-st.markdown("")
+def main():
+    # --- Fixed Header ---
+    st.markdown("""
+        <style>
+        .header {
+            position: sticky;
+            top: 0;
+            left: 0;
+            width: 100%;
+            background-color: white;
+            padding: 10px 0;
+            z-index: 1000;
+            border-bottom: 1px solid #ddd;
+            text-align: center;
+        }
+        .header span {
+            font-size: 20px;
+            font-weight: bold;
+            color: #333;
+            vertical-align: middle;
+        }
+        .block-container {
+            padding-top: 45px;
+        }
+        </style>
+        <div class="header">
+            <span>Investia - Sector screening (bèta)</span>
+        </div>
+    """, unsafe_allow_html=True)
 
-# Fetch sector list as name-key dictionary
-sectors_dict = get_available_sectors()
-sector_names = list(sectors_dict.keys())
+    st.set_page_config(page_title="Investia Sector", layout="wide")
+    #st.markdown("## Industry screening - Bèta version")
+    st.markdown("")
 
-# Sector selection
-selected_sector_name = st.radio(
-    "### Select a sector:",
-    options=sector_names,
-    horizontal=True,
-    key="sector_radio",
-    index=None
-)
+    # Fetch sector list as name-key dictionary
+    sectors_dict = get_available_sectors()
+    sector_names = list(sectors_dict.keys())
 
-if selected_sector_name:
+    # Sector selection
+    selected_sector_name = st.radio(
+        "### Select a sector:",
+        options=sector_names,
+        horizontal=True,
+        key="sector_radio",
+        index=None
+    )
+
+    if not selected_sector_name:
+        st.stop()
+
     selected_sector_key = sectors_dict[selected_sector_name]
 
     # Fetch industries for the selected sector
     industries_dict = get_industries_for_sector(selected_sector_key)
     industry_names = list(industries_dict.keys())
 
-    if industry_names:
-        industry_names_with_all = ["All"] + industry_names
-        selected_industry_names = st.multiselect("Select one or more industries:", industry_names_with_all)
-
-        # Expand to all if 'All' is selected
-        if "All" in selected_industry_names:
-            selected_industry_names = industry_names
-        selected_industry_keys = [industries_dict[name] for name in selected_industry_names]
-
-        # Display selected industries
-        if selected_industry_names:
-            st.success(f"Selected industries: {', '.join(selected_industry_names)}")
-
-            # Choice of data type for companies
-            data_choices = {
-                'Top Companies': 'top_companies',
-                'Top Growth': 'top_growth_companies',
-                'Top Performers': 'top_performing_companies'
-            }
-
-            selected_data_label = st.radio(
-                "### Select data type to display:",
-                options=list(data_choices.keys()),
-                horizontal=True,
-                key="data_choice_radio",
-                index=None
-            )
-
-            if selected_data_label:
-                selected_data_method = data_choices[selected_data_label]
-
-                # Get the final enriched dataframe
-                final_df = combine_industry_dataframes(selected_industry_names, selected_industry_keys, selected_data_method)
-
-                if not final_df.empty:
-                    # Round all numeric columns to 2 decimals
-                    final_df = final_df.round(2)
-
-                    # --- Filtering Section ---
-                    st.markdown("#### Filter Data")
-
-                    with st.expander("Apply Filters", expanded=False):
-                        if "Market Cap (M USD)" in final_df.columns:
-                            cap_series = pd.to_numeric(final_df["Market Cap (M USD)"], errors="coerce").dropna()
-                            if not cap_series.empty:
-                                min_cap = float(cap_series.min())
-                                max_cap = float(cap_series.max())
-                                cap_col, _ = st.columns([2, 5])
-                                with cap_col:
-                                    selected_cap_range = st.slider(
-                                        "Market Cap (in million $):",
-                                        min_value=min_cap,
-                                        max_value=max_cap,
-                                        value=(min_cap, max_cap)
-                                    )
-                                final_df = final_df[
-                                    (pd.to_numeric(final_df["Market Cap (M USD)"], errors="coerce") >= selected_cap_range[0]) &
-                                    (pd.to_numeric(final_df["Market Cap (M USD)"], errors="coerce") <= selected_cap_range[1])
-                                ]
-                            else:
-                                st.info("Market Cap column found but contains no numeric values.")
-                        else:
-                            st.info("Market Cap (M USD) column not found in data.")
-
-                        # Checkbox for top 20 by Market Cap
-                        show_top_20 = st.checkbox("Show only top 20 by Market Cap")
-                        if show_top_20 and "Market Cap (M USD)" in final_df.columns:
-                            final_df = final_df.head(20)
-
-                        # Checkboxes for each unique rating
-                        if "Rating" in final_df.columns:
-                            st.markdown("**Filter by Rating:**")
-                            ratings = sorted(final_df["Rating"].dropna().unique())
-                            rating_cols = st.columns(len(ratings))
-                            selected_ratings = []
-                            for col, rating in zip(rating_cols, ratings):
-                                if col.checkbox(str(rating), value=True):
-                                    selected_ratings.append(rating)
-                            if selected_ratings:
-                                final_df = final_df[final_df["Rating"].isin(selected_ratings)]
-
-                    # Sort by Market Cap before displaying, if present
-                    if "Market Cap (M USD)" in final_df.columns:
-                        final_df = final_df.sort_values(by="Market Cap (M USD)", ascending=False)
-                        final_df = final_df.reset_index(drop=True)
-
-                    st.subheader("Company Data")
-
-                    # Columns to apply background gradient
-                    gradient_columns = ["Gross Margin (%)", "EBIT Margin (%)", "EBITDA Margin (%)"]
-                    inverse_gradient_columns = ["P/E", "EV/EBITDA", "EV/Sales", "P/FCF"]
-
-                    # Function to create a gmap with clipping and normalisation, ensuring numeric input
-                    def normalise_for_gradient(series, reverse=False):
-                        numeric_series = pd.to_numeric(series, errors='coerce').dropna()
-                        lower = numeric_series.quantile(0.05)
-                        upper = numeric_series.quantile(0.95)
-                        clipped = numeric_series.clip(lower, upper)
-                        normalised = (clipped - lower) / (upper - lower)
-                        if reverse:
-                            normalised = 1 - normalised
-                        return normalised.reindex(series.index, fill_value=None)
-
-                    # Create a Styler object
-                    styler = final_df.style.set_na_rep("").highlight_null(null_color="#d3d3d3").format(precision=2)
-
-                    # Apply background gradients using continuous normalised gmap
-                    for col in gradient_columns:
-                        if col in final_df.columns:
-                            gmap = normalise_for_gradient(final_df[col])
-                            styler = styler.background_gradient(cmap="RdYlGn", subset=[col], gmap=gmap)
-                    for col in inverse_gradient_columns:
-                        if col in final_df.columns:
-                            gmap = normalise_for_gradient(final_df[col], reverse=True)
-                            styler = styler.background_gradient(cmap="RdYlGn", subset=[col], gmap=gmap)
-
-                    st.dataframe(styler)
-
-                    import io
-
-                    # --- Export options for styled and plain Excel files ---
-                    col1, col2, _ = st.columns([2, 2, 14])
-
-                    # Export styled Excel
-                    styled_buffer = io.BytesIO()
-                    with pd.ExcelWriter(styled_buffer, engine='openpyxl') as writer:
-                        styler.to_excel(writer, sheet_name="Companies")
-                    styled_buffer.seek(0)
-                    with col1:
-                        st.download_button(
-                            label="Formatted Excel",
-                            data=styled_buffer,
-                            file_name="industry_companies_styled.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-
-                    # Export plain Excel
-                    plain_buffer = io.BytesIO()
-                    final_df.to_excel(plain_buffer, index=False, engine='openpyxl')
-                    plain_buffer.seek(0)
-                    with col2:
-                        st.download_button(
-                            label="Plain Excel",
-                            data=plain_buffer,
-                            file_name="industry_companies_plain.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-
-                    # --- Optional Upload of Custom Ticker List ---
-                    uploaded_file = st.file_uploader("Optional: Upload custom ticker list (Excel with 1 ticker per row)", type=["xlsx"])
-
-                    if uploaded_file:
-                        try:
-                            # Read the file
-                            custom_df = pd.read_excel(uploaded_file)
-
-                            # Assume tickers are in the first column
-                            tickers = custom_df.iloc[:, 0].dropna().astype(str).unique().tolist()
-
-                            if tickers:
-                                st.success(f"{len(tickers)} custom tickers uploaded.")
-
-                                # Fetch additional data using your logic function
-                                from logic import fetch_additional_company_data
-                                uploaded_data_df = fetch_additional_company_data(pd.DataFrame({"symbol": tickers}))
-
-                                # Combine with final_df if present
-                                if 'final_df' in locals() and not final_df.empty:
-                                    combined_df = pd.concat([final_df, uploaded_data_df], ignore_index=True)
-                                else:
-                                    combined_df = uploaded_data_df
-
-                                st.subheader("Combined Data")
-                                st.dataframe(combined_df)
-
-                                # --- Export options for combined dataframe ---
-                                col3, col4, _ = st.columns([2, 2, 14])
-
-                                # Export styled Excel for combined
-                                styled_combined = combined_df.style.set_na_rep("").highlight_null(null_color="#d3d3d3").format(precision=2)
-                                styled_combined_buffer = io.BytesIO()
-                                with pd.ExcelWriter(styled_combined_buffer, engine='openpyxl') as writer:
-                                    styled_combined.to_excel(writer, sheet_name="Combined")
-                                styled_combined_buffer.seek(0)
-                                with col3:
-                                    st.download_button(
-                                        label="Formatted Excel",
-                                        data=styled_combined_buffer,
-                                        file_name="combined_companies_styled.xlsx",
-                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                    )
-
-                                # Export plain Excel for combined
-                                plain_combined_buffer = io.BytesIO()
-                                combined_df.to_excel(plain_combined_buffer, index=False, engine='openpyxl')
-                                plain_combined_buffer.seek(0)
-                                with col4:
-                                    st.download_button(
-                                        label="Plain Excel",
-                                        data=plain_combined_buffer,
-                                        file_name="combined_companies_plain.xlsx",
-                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                    )
-                        except Exception as e:
-                            st.error(f"Error processing uploaded file: {e}")
-
-                else:
-                    st.warning("No data available for the selected industries and data method.")
-    else:
+    if not industry_names:
         st.warning("No industries found for this sector. Might be due to an error in fetching data.")
+        st.stop()
 
-# --- Fixed Footer ---
-st.markdown("""
-    <style>
-    .footer {
-        position: fixed;
-        left: 0;
-        bottom: 0;
-        width: 100%;
-        text-align: center;
-        background-color: white;
-        padding: 10px;
-        font-size: 0.85em;
-        color: grey;
-        z-index: 100;
-        border-top: 1px solid #ddd;
+    industry_names_with_all = ["All"] + industry_names
+    selected_industry_names = st.multiselect("Select one or more industries:", industry_names_with_all)
+
+    # Expand to all if 'All' is selected
+    if "All" in selected_industry_names:
+        selected_industry_names = industry_names
+    selected_industry_keys = [industries_dict[name] for name in selected_industry_names]
+
+    # Display selected industries
+    if not selected_industry_names:
+        st.stop()
+
+    st.success(f"Selected industries: {', '.join(selected_industry_names)}")
+
+    # Choice of data type for companies
+    data_choices = {
+        'Top Companies': 'top_companies',
+        'Top Growth': 'top_growth_companies',
+        'Top Performers': 'top_performing_companies'
     }
-    </style>
-    <div class="footer">
-        <i>This is a bèta version. All rights reserved by Investia. Suggestions or errors can be reported to Vince Coppens.</i>
-    </div>
-""", unsafe_allow_html=True)
+
+    selected_data_label = st.radio(
+        "### Select data type to display:",
+        options=list(data_choices.keys()),
+        horizontal=True,
+        key="data_choice_radio",
+        index=None
+    )
+
+    if not selected_data_label:
+        st.stop()
+
+    selected_data_method = data_choices[selected_data_label]
+
+    # Get the final enriched dataframe
+    final_df = combine_industry_dataframes(selected_industry_names, selected_industry_keys, selected_data_method)
+
+    if final_df.empty:
+        st.warning("No data available for the selected industries and data method.")
+        st.stop()
+
+    with st.expander("Apply Filters", expanded=False):
+        cap_range = None
+        top_n = None
+        selected_ratings = None
+
+        if "Market Cap (M USD)" in final_df.columns:
+            cap_series = pd.to_numeric(final_df["Market Cap (M USD)"], errors="coerce").dropna()
+            if not cap_series.empty:
+                min_cap = int(cap_series.min()) - 1
+                max_cap = int(cap_series.max()) + 1
+                cap_col, _ = st.columns([2, 5])
+                with cap_col:
+                    cap_range = st.slider(
+                        "Market Cap (in million $):",
+                        min_value=min_cap,
+                        max_value=max_cap,
+                        value=(min_cap, max_cap)
+                    )
+            else:
+                st.info("Market Cap column found but contains no numeric values.")
+        else:
+            st.info("Market Cap (M USD) column not found in data.")
+
+        show_top_20 = st.checkbox("Show only top 20 by Market Cap")
+        if show_top_20:
+            top_n = 20
+
+        if "Rating" in final_df.columns:
+            st.markdown("**Filter by Rating:**")
+            ratings = sorted(final_df["Rating"].dropna().unique())
+            rating_cols = st.columns(len(ratings))
+            selected_ratings = [
+                rating for col, rating in zip(rating_cols, ratings)
+                if col.checkbox(str(rating), value=True)
+            ]
+
+        final_df = apply_filters(final_df, cap_range=cap_range, top_n=top_n, selected_ratings=selected_ratings)
+
+    final_df = apply_final_sorting_and_formatting(final_df)
+    
+    st.subheader("Company Data")
+
+    # Columns to apply background gradient
+    gradient_columns = ["Gross Margin (%)", "EBIT Margin (%)", "EBITDA Margin (%)"]
+    inverse_gradient_columns = ["P/E", "EV/EBITDA", "EV/Sales", "P/FCF"]
+
+    # Use create_styler from logic.py
+    styler = create_styler(final_df, gradient_columns, inverse_gradient_columns)
+
+    # --- Filtering Section ---
+    st.markdown("#### Filter Data")
+
+    st.dataframe(styler)
+
+    # --- Export options for styled and plain Excel files ---
+    styled_buffer = generate_styled_excel(final_df, gradient_columns, inverse_gradient_columns, sheet_name="Companies")
+    plain_buffer = generate_plain_excel(final_df, sheet_name="Companies")
+
+    render_download_buttons(
+        styled_buffer, "industry_companies_styled.xlsx",
+        plain_buffer, "industry_companies_plain.xlsx"
+    )
+
+    # --- Optional Upload of Custom Ticker List ---
+    uploaded_file = st.file_uploader("Optional: Upload custom ticker list (Excel with 1 ticker per row)", type=["xlsx"])
+
+    if uploaded_file:
+        try:
+            # Read the file
+            custom_df = pd.read_excel(uploaded_file, header=None)
+
+            tickers = custom_df.iloc[:, 0].dropna().astype(str).unique().tolist()
+
+            if tickers:
+                st.success(f"{len(tickers)} custom tickers uploaded.")
+
+                # Fetch additional data using your logic function
+                uploaded_data_df = fetch_additional_company_data(pd.DataFrame({"symbol": tickers}))
+
+                # Combine with final_df if present
+                if not final_df.empty:
+                    combined_df = pd.concat([final_df, uploaded_data_df], ignore_index=True)
+                else:
+                    combined_df = uploaded_data_df
+
+                combined_df = apply_final_sorting_and_formatting(combined_df)
+                # Drop specified columns before styling/export
+                combined_df.drop(columns=["Market Weight (%)", "Industry", "Rating"], inplace=True, errors="ignore")
+                styler_combined = create_styler(combined_df, gradient_columns, inverse_gradient_columns)
+
+                st.subheader("Combined Data")
+                st.dataframe(styler_combined)
+
+                # --- Export options for combined dataframe ---
+                styled_combined_buffer = generate_styled_excel(combined_df, gradient_columns, inverse_gradient_columns, sheet_name="Combined")
+                plain_combined_buffer = generate_plain_excel(combined_df, sheet_name="Combined")
+
+                render_download_buttons(
+                    styled_combined_buffer, "combined_companies_styled.xlsx",
+                    plain_combined_buffer, "combined_companies_plain.xlsx"
+                )
+        except Exception as e:
+            st.error(f"Error processing uploaded file: {e}")
+
+    # --- Fixed Footer ---
+    st.markdown("""
+        <style>
+        .footer {
+            position: fixed;
+            left: 0;
+            bottom: 0;
+            width: 100%;
+            text-align: center;
+            background-color: white;
+            padding: 10px;
+            font-size: 0.85em;
+            color: grey;
+            z-index: 100;
+            border-top: 1px solid #ddd;
+        }
+        </style>
+        <div class="footer">
+            <i>This is a bèta version. All rights reserved by Investia. Suggestions or errors can be reported to Vince Coppens.</i>
+        </div>
+    """, unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
