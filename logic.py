@@ -194,8 +194,8 @@ def create_styler(df, gradient_columns=None, inverse_gradient_columns=None):
     if inverse_gradient_columns is None:
         inverse_gradient_columns = []
 
-    styler = df.style.set_na_rep("").highlight_null(null_color="#d3d3d3").format(precision=2)
-
+    styler = df.style.format(precision=2)  
+      
     for col in gradient_columns:
         if col in df.columns:
             gmap = normalise_for_gradient(df[col])
