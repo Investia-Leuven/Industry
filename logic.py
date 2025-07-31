@@ -1,4 +1,8 @@
 import yfinance as yf
+import streamlit as st
+from functools import lru_cache
+
+@st.cache_data(show_spinner=False)
 def get_available_sectors():
     return {
         "Basic Materials": "basic-materials",
@@ -15,8 +19,7 @@ def get_available_sectors():
     }
 
 
-import streamlit as st
-
+@st.cache_data(show_spinner=False)
 def get_industries_for_sector(sector_key):
     try:
         sector = yf.Sector(sector_key)
@@ -26,7 +29,7 @@ def get_industries_for_sector(sector_key):
         return {}
 
 
-# Get companies for an industry using the selected data method
+@st.cache_data(show_spinner=False)
 def get_companies_for_industry(industry_key, data_method):
     try:
         industry = yf.Industry(industry_key)
@@ -63,61 +66,50 @@ def combine_industry_dataframes(industry_names, industry_keys, data_method):
 Fetches extended financial data from Yahoo Finance for a list of company tickers.
 Converts currencies to USD, scales to millions, and calculates financial ratios.
 """
+@st.cache_data(show_spinner=False)
 def fetch_additional_company_data(df_with_symbols):
     """
     Extends the given DataFrame of companies with additional financial metrics from yfinance.
     Returns a DataFrame with columns in the specified order.
     """
     import pandas as pd
+
     tickers = df_with_symbols["symbol"].tolist()
     yf_tickers = yf.Tickers(" ".join(tickers)).tickers
+    info_dict = {symbol: yf_tickers[symbol].info for symbol in tickers if symbol in yf_tickers}
 
-    enriched_data = []
+    exchange_rates = {
+        "USD": 1.0,
+        "EUR": 1.1,
+        "GBP": 1.3,
+        "JPY": 0.007,
+        "CAD": 0.75
+    }
 
-    for _, row in df_with_symbols.iterrows():
-        symbol = row["symbol"]
-        company_name = row.get("name")
-        # If company_name is None or empty, try to get from yf_tickers info shortName
+    rows = []
+    for symbol, company_name, industry, market_weight, rating in zip(
+            df_with_symbols["symbol"],
+            df_with_symbols.get("name", pd.Series([None]*len(df_with_symbols))),
+            df_with_symbols.get("Industry", pd.Series([""]*len(df_with_symbols))),
+            df_with_symbols.get("market weight", pd.Series([None]*len(df_with_symbols))),
+            df_with_symbols.get("rating", pd.Series([""]*len(df_with_symbols)))):
+        
+        info = info_dict.get(symbol, {})
         if not company_name:
-            info_temp = yf_tickers.get(symbol, {}).info if symbol in yf_tickers else {}
-            company_name = info_temp.get("shortName", None)
-        industry = row.get("Industry", "")
-        market_weight = row.get("market weight", None)
-        rating = row.get("rating", "")
+            company_name = info.get("shortName", None)
 
-        info = yf_tickers.get(symbol, {}).info if symbol in yf_tickers else {}
         currency = info.get("currency", "USD")
-
-        # Example exchange rates (mock)
-        exchange_rates = {
-            "USD": 1.0,
-            "EUR": 1.1,
-            "GBP": 1.3,
-            "JPY": 0.007,
-            "CAD": 0.75
-        }
         rate = exchange_rates.get(currency, 1.0)
 
-        # Convert market_weight to percentage if available
-        if market_weight is not None:
-            market_weight *= 100  # convert to percentage
+        market_weight = market_weight*100 if market_weight is not None else None
 
-        # Use ebitMargins, fallback to operatingMargins if not available
-        ebit_margin = info.get("ebitMargins")
-        if ebit_margin is None:
-            ebit_margin = info.get("operatingMargins")
-
-        # Convert margin fields to percentage
+        ebit_margin = info.get("ebitMargins") or info.get("operatingMargins")
         gross_margin = info.get("grossMargins")
-        if gross_margin is not None:
-            gross_margin *= 100
-
-        if ebit_margin is not None:
-            ebit_margin *= 100
-
         ebitda_margin = info.get("ebitdaMargins")
-        if ebitda_margin is not None:
-            ebitda_margin *= 100
+
+        gross_margin = gross_margin*100 if gross_margin is not None else None
+        ebit_margin = ebit_margin*100 if ebit_margin is not None else None
+        ebitda_margin = ebitda_margin*100 if ebitda_margin is not None else None
 
         revenue = info.get("totalRevenue")
         market_cap = info.get("marketCap")
@@ -125,14 +117,12 @@ def fetch_additional_company_data(df_with_symbols):
         enterprise_to_ebitda = info.get("enterpriseToEbitda")
         enterprise_to_revenue = info.get("enterpriseToRevenue")
 
-        # Convert financial values to USD and to millions
-        revenue = (revenue * rate / 1_000_000) if revenue is not None else None
-        market_cap = (market_cap * rate / 1_000_000) if market_cap is not None else None
-        free_cashflow = (free_cashflow * rate / 1_000_000) if free_cashflow is not None else None
+        revenue = (revenue*rate/1_000_000) if revenue is not None else None
+        market_cap = (market_cap*rate/1_000_000) if market_cap is not None else None
+        free_cashflow = (free_cashflow*rate/1_000_000) if free_cashflow is not None else None
+        p_fcf_ratio = (market_cap/free_cashflow) if market_cap and free_cashflow else None
 
-        p_fcf_ratio = (market_cap / free_cashflow) if market_cap and free_cashflow else None
-
-        enriched_data.append({
+        rows.append({
             "Name": company_name,
             "Ticker": symbol,
             "Revenue (M USD)": revenue,
@@ -149,13 +139,12 @@ def fetch_additional_company_data(df_with_symbols):
             "Rating": rating
         })
 
-    # Specify the column order
     columns = [
         "Name", "Ticker", "Revenue (M USD)", "Market Cap (M USD)", "Gross Margin (%)",
         "EBIT Margin (%)", "EBITDA Margin (%)", "P/E", "EV/EBITDA", "EV/Sales",
         "P/FCF", "Market Weight (%)", "Industry", "Rating"
     ]
-    df = pd.DataFrame(enriched_data, columns=columns)
+    df = pd.DataFrame(rows, columns=columns)
     return df.round(2)
 
 def apply_final_sorting_and_formatting(df):
@@ -163,7 +152,11 @@ def apply_final_sorting_and_formatting(df):
     if "Market Cap (M USD)" in df.columns:
         df["Market Cap (M USD)"] = pd.to_numeric(df["Market Cap (M USD)"], errors="coerce")
         df = df.sort_values(by="Market Cap (M USD)", ascending=False)
-    return df.reset_index(drop=True).round(2)
+
+    # Reset index starting at 1
+    df = df.reset_index(drop=True)
+    df.index = df.index + 1
+    return df.round(2)
 
 def apply_filters(df, cap_range=None, top_n=None, selected_ratings=None):
     import pandas as pd
@@ -222,10 +215,26 @@ def process_uploaded_tickers(uploaded_file, existing_df):
 
     # Assume tickers are in the first column
     tickers = custom_df.iloc[:, 0]
-    tickers = tickers[~tickers.isna()].astype(str).str.strip()
-    tickers = tickers[tickers != ""].tolist()
+
+    # Drop NaN, strip whitespace, convert to string and uppercase
+    tickers = tickers[~tickers.isna()].astype(str).str.strip().str.upper()
+
+    # Remove empty rows
+    tickers = tickers[tickers != ""]
+
+    # Ensure one ticker per row: if extra columns contain non-null values, return error
+    if custom_df.shape[1] > 1 and custom_df.iloc[:, 1:].notna().any().any():
+        return None, "Excel file must contain exactly 1 ticker per row (extra columns detected)."
+
+    # Remove duplicates
+    tickers = tickers.drop_duplicates()
+
+    # Convert to list
+    tickers = tickers.tolist()
+
+    # Final check
     if not tickers:
-        return None, "No tickers found in uploaded file."
+        return None, "No valid tickers found in uploaded file. Ensure 1 ticker per row."
 
     # Build names list using yfinance shortName for each ticker
     names = []
@@ -261,20 +270,37 @@ def generate_plain_excel(df, sheet_name="Sheet1"):
     buffer.seek(0)
     return buffer
 
-def render_download_buttons(styled_buffer, styled_filename, plain_buffer, plain_filename):
+def render_download_buttons(
+    df,
+    styled_filename,
+    plain_filename,
+    gradient_columns=None,
+    inverse_gradient_columns=None,
+    sheet_name="Sheet1"
+):
+    """
+    Lazily generate and render download buttons for styled and plain Excel files.
+    """
     import streamlit as st
-    col1, col2, _ = st.columns([2, 2, 14])
+
+    col1, col2, _ = st.columns([1, 1, 7])
     with col1:
         st.download_button(
             label="Formatted Excel",
-            data=styled_buffer,
+            data=generate_styled_excel(df, gradient_columns, inverse_gradient_columns, sheet_name=sheet_name),
             file_name=styled_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     with col2:
         st.download_button(
             label="Plain Excel",
-            data=plain_buffer,
+            data=generate_plain_excel(df, sheet_name=sheet_name),
             file_name=plain_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
+def get_gradient_columns():
+    """Return gradient and inverse gradient column lists for styling."""
+    gradient_columns = ["Gross Margin (%)", "EBIT Margin (%)", "EBITDA Margin (%)"]
+    inverse_gradient_columns = ["P/E", "EV/EBITDA", "EV/Sales", "P/FCF"]
+    return gradient_columns, inverse_gradient_columns
