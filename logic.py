@@ -304,3 +304,46 @@ def get_gradient_columns():
     gradient_columns = ["Gross Margin (%)", "EBIT Margin (%)", "EBITDA Margin (%)"]
     inverse_gradient_columns = ["P/E", "EV/EBITDA", "EV/Sales", "P/FCF"]
     return gradient_columns, inverse_gradient_columns
+
+def render_filter_ui(df, label_suffix=""):
+    """Render cap, top N, and rating filters and return user-selected values."""
+    import streamlit as st
+    import pandas as pd
+
+    cap_range = None
+    top_n = None
+    selected_ratings = None
+
+    with st.expander(f"Apply Filters{label_suffix}", expanded=False):
+        if "Market Cap (M USD)" in df.columns:
+            cap_series = pd.to_numeric(df["Market Cap (M USD)"], errors="coerce").dropna()
+            if not cap_series.empty:
+                min_cap = int(cap_series.min()) - 1
+                max_cap = int(cap_series.max()) + 1
+                cap_col, _ = st.columns([2, 5])
+                with cap_col:
+                    cap_range = st.slider(
+                        f"Market Cap (in million $){label_suffix}:",
+                        min_value=min_cap,
+                        max_value=max_cap,
+                        value=(min_cap, max_cap)
+                    )
+            else:
+                st.info("Market Cap column found but contains no numeric values.")
+        else:
+            st.info("Market Cap (M USD) column not found in data.")
+
+        show_top_20 = st.checkbox(f"Show only top 20 by Market Cap{label_suffix}")
+        if show_top_20:
+            top_n = 20
+
+        if "Rating" in df.columns:
+            st.markdown(f"**Filter by Rating{label_suffix}:**")
+            ratings = sorted(df["Rating"].dropna().unique())
+            rating_cols = st.columns(len(ratings))
+            selected_ratings = [
+                rating for col, rating in zip(rating_cols, ratings)
+                if col.checkbox(str(rating), value=True, key=f"{label_suffix}_rating_{rating}")
+            ]
+
+    return cap_range, top_n, selected_ratings

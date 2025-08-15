@@ -11,7 +11,8 @@ from logic import (
     create_styler,
     render_download_buttons,
     process_uploaded_tickers,
-    get_gradient_columns
+    get_gradient_columns,
+    render_filter_ui
 )
 
 st.set_page_config(page_title="Investia Sector", layout="wide")
@@ -73,7 +74,8 @@ def main():
                 unsafe_allow_html=True
             )
         with col3:
-            st.empty()
+            with open("help.pdf", "rb") as f:
+                st.download_button(label="info", data=f,file_name="investia_sector_help.pdf", mime="application/pdf", use_container_width=True)
     def display_footer():
         """Display sticky footer."""
         st.markdown("""
@@ -136,6 +138,9 @@ def main():
 
             st.success(f"{len(combined_df)} tickers successfully processed from upload.")
 
+            cap_range, top_n, selected_ratings = render_filter_ui(combined_df, label_suffix=" (Uploaded)")
+            combined_df = apply_filters(combined_df, cap_range, top_n, selected_ratings)
+
             combined_df.drop(columns=["Market Weight (%)", "Industry", "Rating"], inplace=True, errors="ignore")
             display_and_export_df(
                 combined_df,
@@ -171,21 +176,33 @@ def main():
 
     st.success(f"Selected industries: {', '.join(selected_industry_names)}")
 
+    st.markdown("### Select data type to display:")
+
     data_choices = {
-        'Top Companies': 'top_companies',
-        'Top Growth': 'top_growth_companies',
-        'Top Performers': 'top_performing_companies'
+        'Top Companies': {
+            'value': 'top_companies',
+            'help': 'Largest companies by market capitalisation according to the YahooFinance API.'
+        },
+        'Top Growth': {
+            'value': 'top_growth_companies',
+            'help': 'Companies showing the strongest growth metrics (e.g. revenue or earnings growth).'
+        },
+        'Top Performers': {
+            'value': 'top_performing_companies',
+            'help': 'Companies with the best recent stock price performance.'
+        }
     }
-    selected_data_label = st.radio(
-        "### Select data type to display:",
-        options=list(data_choices.keys()),
+
+    radio_labels = list(data_choices.keys())
+    selected_label = st.radio(
+        label="",
+        options=radio_labels,
+        format_func=lambda x: x,
         horizontal=True,
-        key="data_choice_radio",
-        index=None
+        key="data_choice_radio"
     )
-    if not selected_data_label:
-        st.stop()
-    selected_data_method = data_choices[selected_data_label]
+    selected_data_method = data_choices[selected_label]['value']
+    st.caption(data_choices[selected_label]['help'])
 
     final_df = combine_industry_dataframes(selected_industry_names, selected_industry_keys, selected_data_method)
 
@@ -193,43 +210,8 @@ def main():
         st.warning("No data available for the selected industries and data method.")
         st.stop()
 
-    with st.expander("Apply Filters", expanded=False):
-        cap_range = None
-        top_n = None
-        selected_ratings = None
-
-        if "Market Cap (M USD)" in final_df.columns:
-            cap_series = pd.to_numeric(final_df["Market Cap (M USD)"], errors="coerce").dropna()
-            if not cap_series.empty:
-                min_cap = int(cap_series.min()) - 1
-                max_cap = int(cap_series.max()) + 1
-                cap_col, _ = st.columns([2, 5])
-                with cap_col:
-                    cap_range = st.slider(
-                        "Market Cap (in million $):",
-                        min_value=min_cap,
-                        max_value=max_cap,
-                        value=(min_cap, max_cap)
-                    )
-            else:
-                st.info("Market Cap column found but contains no numeric values.")
-        else:
-            st.info("Market Cap (M USD) column not found in data.")
-
-        show_top_20 = st.checkbox("Show only top 20 by Market Cap")
-        if show_top_20:
-            top_n = 20
-
-        if "Rating" in final_df.columns:
-            st.markdown("**Filter by Rating:**")
-            ratings = sorted(final_df["Rating"].dropna().unique())
-            rating_cols = st.columns(len(ratings))
-            selected_ratings = [
-                rating for col, rating in zip(rating_cols, ratings)
-                if col.checkbox(str(rating), value=True)
-            ]
-
-        final_df = apply_filters(final_df, cap_range=cap_range, top_n=top_n, selected_ratings=selected_ratings)
+    cap_range, top_n, selected_ratings = render_filter_ui(final_df)
+    final_df = apply_filters(final_df, cap_range, top_n, selected_ratings)
 
     display_and_export_df(
         final_df,
@@ -250,6 +232,9 @@ def main():
             st.stop()
         uploaded_count = len(combined_df) - len(final_df)
         st.success(f"{uploaded_count} tickers successfully processed from upload.")
+
+        combined_cap_range, combined_top_n, combined_selected_ratings = render_filter_ui(combined_df, label_suffix=" (Combined)")
+        combined_df = apply_filters(combined_df, combined_cap_range, combined_top_n, combined_selected_ratings)
 
         combined_df.drop(columns=["Market Weight (%)", "Industry", "Rating"], inplace=True, errors="ignore")
         display_and_export_df(
