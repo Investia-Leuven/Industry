@@ -15,7 +15,7 @@ from logic import (
     render_filter_ui
 )
 
-st.set_page_config(page_title="Investia Sector", layout="wide")
+st.set_page_config(page_title="Investia Sector", page_icon="investia_favicon.png", layout="wide")
 
 def display_and_export_df(df, title, styled_filename, plain_filename, sheet_name):
     """Sort, style, display, and render download buttons for a DataFrame."""
