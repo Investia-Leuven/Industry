@@ -1,9 +1,26 @@
+"""Core logic for the Investia Sector app.
+
+Provides functions to fetch, enrich, filter, and style financial data related to sectors, industries, and companies.
+"""
+
+# Standard library imports
+from io import BytesIO
+
+# Third-party imports
+import pandas as pd
 import yfinance as yf
 import streamlit as st
+
+# Local imports
 from functools import lru_cache
+
 
 @st.cache_data(show_spinner=False)
 def get_available_sectors():
+    """
+    Returns a dictionary mapping sector display names to their keys used in yfinance.
+    Provides the list of available sectors for selection.
+    """
     return {
         "Basic Materials": "basic-materials",
         "Communication Services": "communication-services",
@@ -21,6 +38,10 @@ def get_available_sectors():
 
 @st.cache_data(show_spinner=False)
 def get_industries_for_sector(sector_key):
+    """
+    Given a sector key, returns a dictionary mapping industry names to their keys.
+    Used to retrieve industries within a selected sector.
+    """
     try:
         sector = yf.Sector(sector_key)
         df = sector.industries  # This returns a DataFrame
@@ -31,6 +52,10 @@ def get_industries_for_sector(sector_key):
 
 @st.cache_data(show_spinner=False)
 def get_companies_for_industry(industry_key, data_method):
+    """
+    Given an industry key and data method name, returns a DataFrame of companies.
+    Used to fetch company data for a selected industry.
+    """
     try:
         industry = yf.Industry(industry_key)
         df = getattr(industry, data_method)
@@ -38,7 +63,6 @@ def get_companies_for_industry(industry_key, data_method):
     except Exception:
         return None
 
-import pandas as pd
 
 """
 Combines data from multiple industries into one DataFrame and enriches it with additional financial metrics.
@@ -49,16 +73,21 @@ def combine_industry_dataframes(industry_names, industry_keys, data_method):
     """
     combined_list = []
     for industry_name, industry_key in zip(industry_names, industry_keys):
+        # Retrieve company data for the industry
         df = get_companies_for_industry(industry_key, data_method)
         if df is not None and not df.empty:
+            # Ensure 'symbol' column exists, resetting index if necessary
             if 'symbol' not in df.columns and df.index.name == 'symbol':
                 df = df.reset_index()
             df = df.copy()
+            # Tag the DataFrame with the industry name
             df["Industry"] = industry_name
             combined_list.append(df)
     if not combined_list:
         return pd.DataFrame()
+    # Concatenate all industry DataFrames into one
     full_df = pd.concat(combined_list, ignore_index=True)
+    # Enrich combined DataFrame with additional financial data
     enriched_df = fetch_additional_company_data(full_df)
     return enriched_df
 
@@ -70,14 +99,17 @@ Converts currencies to USD, scales to millions, and calculates financial ratios.
 def fetch_additional_company_data(df_with_symbols):
     """
     Extends the given DataFrame of companies with additional financial metrics from yfinance.
+    Enriches data by converting currencies to USD using exchange rates, scaling revenue and market cap to millions,
+    and calculating financial ratios such as P/FCF.
     Returns a DataFrame with columns in the specified order.
     """
-    import pandas as pd
 
+    # Prepare tickers and fetch info for all
     tickers = df_with_symbols["symbol"].tolist()
     yf_tickers = yf.Tickers(" ".join(tickers)).tickers
     info_dict = {symbol: yf_tickers[symbol].info for symbol in tickers if symbol in yf_tickers}
 
+    # Exchange rates to convert various currencies to USD
     exchange_rates = {
         "USD": 1.0,
         "EUR": 1.1,
@@ -87,6 +119,7 @@ def fetch_additional_company_data(df_with_symbols):
     }
 
     rows = []
+    # Iterate over each company row to enrich data
     for symbol, company_name, industry, market_weight, rating in zip(
             df_with_symbols["symbol"],
             df_with_symbols.get("name", pd.Series([None]*len(df_with_symbols))),
@@ -95,33 +128,41 @@ def fetch_additional_company_data(df_with_symbols):
             df_with_symbols.get("rating", pd.Series([""]*len(df_with_symbols)))):
         
         info = info_dict.get(symbol, {})
+        # Use yfinance shortName if company_name missing
         if not company_name:
             company_name = info.get("shortName", None)
 
         currency = info.get("currency", "USD")
         rate = exchange_rates.get(currency, 1.0)
 
+        # Convert market weight to percentage if present
         market_weight = market_weight*100 if market_weight is not None else None
 
+        # Extract margin metrics, fallback to operatingMargins if ebitMargins missing
         ebit_margin = info.get("ebitMargins") or info.get("operatingMargins")
         gross_margin = info.get("grossMargins")
         ebitda_margin = info.get("ebitdaMargins")
 
+        # Convert margins to percentages
         gross_margin = gross_margin*100 if gross_margin is not None else None
         ebit_margin = ebit_margin*100 if ebit_margin is not None else None
         ebitda_margin = ebitda_margin*100 if ebitda_margin is not None else None
 
+        # Extract financial metrics
         revenue = info.get("totalRevenue")
         market_cap = info.get("marketCap")
         free_cashflow = info.get("freeCashflow")
         enterprise_to_ebitda = info.get("enterpriseToEbitda")
         enterprise_to_revenue = info.get("enterpriseToRevenue")
 
+        # Convert revenue, market cap, free cashflow to millions USD
         revenue = (revenue*rate/1_000_000) if revenue is not None else None
         market_cap = (market_cap*rate/1_000_000) if market_cap is not None else None
         free_cashflow = (free_cashflow*rate/1_000_000) if free_cashflow is not None else None
+        # Calculate Price to Free Cash Flow ratio
         p_fcf_ratio = (market_cap/free_cashflow) if market_cap and free_cashflow else None
 
+        # Build row dictionary with enriched data
         rows.append({
             "Name": company_name,
             "Ticker": symbol,
@@ -148,7 +189,10 @@ def fetch_additional_company_data(df_with_symbols):
     return df.round(2)
 
 def apply_final_sorting_and_formatting(df):
-    import pandas as pd
+    """
+    Sorts the DataFrame by Market Cap in descending order if present,
+    resets the index starting at 1, and rounds numeric values to 2 decimals.
+    """
     if "Market Cap (M USD)" in df.columns:
         df["Market Cap (M USD)"] = pd.to_numeric(df["Market Cap (M USD)"], errors="coerce")
         df = df.sort_values(by="Market Cap (M USD)", ascending=False)
@@ -159,7 +203,13 @@ def apply_final_sorting_and_formatting(df):
     return df.round(2)
 
 def apply_filters(df, cap_range=None, top_n=None, selected_ratings=None):
-    import pandas as pd
+    """
+    Applies filters on the DataFrame:
+    - cap_range: tuple of (min, max) market cap in millions USD
+    - top_n: integer to limit to top N companies by market cap
+    - selected_ratings: list of ratings to filter by
+    Returns the filtered DataFrame.
+    """
     if "Market Cap (M USD)" in df.columns:
         df["Market Cap (M USD)"] = pd.to_numeric(df["Market Cap (M USD)"], errors="coerce")
         if cap_range:
@@ -171,17 +221,28 @@ def apply_filters(df, cap_range=None, top_n=None, selected_ratings=None):
     return df
 
 def normalise_for_gradient(series, reverse=False):
-    import pandas as pd
+    """
+    Normalises a numeric pandas Series for gradient coloring.
+    Clips values between 5th and 95th percentiles to reduce outlier impact,
+    then scales to 0-1 range. Optionally reverses the scale.
+    """
     numeric_series = pd.to_numeric(series, errors='coerce').dropna()
     lower = numeric_series.quantile(0.05)
     upper = numeric_series.quantile(0.95)
+    # Clip values to the 5th and 95th percentile range to reduce outlier effect
     clipped = numeric_series.clip(lower, upper)
+    # Scale clipped values to 0-1 range
     normalised = (clipped - lower) / (upper - lower)
     if reverse:
         normalised = 1 - normalised
+    # Reindex to original series index, filling missing with None
     return normalised.reindex(series.index, fill_value=None)
 
 def create_styler(df, gradient_columns=None, inverse_gradient_columns=None):
+    """
+    Creates a pandas Styler object for the DataFrame with background gradients applied
+    to specified columns for visual emphasis. Supports normal and inverse gradients.
+    """
     if gradient_columns is None:
         gradient_columns = []
     if inverse_gradient_columns is None:
@@ -207,8 +268,8 @@ def process_uploaded_tickers(uploaded_file, existing_df):
     fetch additional company data, and combine with an existing DataFrame.
     Returns (combined_df, error_msg).  If error_msg is not None, the DataFrame is None.
     """
-    import pandas as pd
     try:
+        # Read Excel file without header
         custom_df = pd.read_excel(uploaded_file, header=None)
     except Exception as e:
         return None, f"Error reading uploaded file: {e}"
@@ -245,8 +306,10 @@ def process_uploaded_tickers(uploaded_file, existing_df):
         names.append(name)
 
     df_symbols = pd.DataFrame({"symbol": tickers, "name": names})
+    # Fetch enriched data for uploaded tickers
     uploaded_data_df = fetch_additional_company_data(df_symbols)
 
+    # Combine with existing data if present
     if existing_df is not None and not existing_df.empty:
         combined_df = pd.concat([existing_df, uploaded_data_df], ignore_index=True)
     else:
@@ -255,7 +318,10 @@ def process_uploaded_tickers(uploaded_file, existing_df):
     return combined_df, None
 
 def generate_styled_excel(df, gradient_columns=None, inverse_gradient_columns=None, sheet_name="Sheet1"):
-    from io import BytesIO
+    """
+    Generates an in-memory styled Excel file with background gradients applied.
+    Returns a BytesIO buffer containing the Excel file.
+    """
     buffer = BytesIO()
     styler = create_styler(df, gradient_columns, inverse_gradient_columns)
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -264,7 +330,10 @@ def generate_styled_excel(df, gradient_columns=None, inverse_gradient_columns=No
     return buffer
 
 def generate_plain_excel(df, sheet_name="Sheet1"):
-    from io import BytesIO
+    """
+    Generates an in-memory plain Excel file without styling.
+    Returns a BytesIO buffer containing the Excel file.
+    """
     buffer = BytesIO()
     df.to_excel(buffer, index=False, sheet_name=sheet_name, engine="openpyxl")
     buffer.seek(0)
@@ -280,9 +349,8 @@ def render_download_buttons(
 ):
     """
     Lazily generate and render download buttons for styled and plain Excel files.
+    Provides two options: a formatted Excel with gradients and a plain Excel without styling.
     """
-    import streamlit as st
-
     col1, col2, _ = st.columns([1, 1, 7])
     with col1:
         st.download_button(
@@ -307,14 +375,12 @@ def get_gradient_columns():
 
 def render_filter_ui(df, label_suffix=""):
     """Render cap, top N, and rating filters and return user-selected values."""
-    import streamlit as st
-    import pandas as pd
-
     cap_range = None
     top_n = None
     selected_ratings = None
 
     with st.expander(f"Apply Filters{label_suffix}", expanded=False):
+        # Render market cap slider if column exists and has numeric data
         if "Market Cap (M USD)" in df.columns:
             cap_series = pd.to_numeric(df["Market Cap (M USD)"], errors="coerce").dropna()
             if not cap_series.empty:
@@ -333,10 +399,12 @@ def render_filter_ui(df, label_suffix=""):
         else:
             st.info("Market Cap (M USD) column not found in data.")
 
+        # Checkbox to show only top 20 by market cap
         show_top_20 = st.checkbox(f"Show only top 20 by Market Cap{label_suffix}")
         if show_top_20:
             top_n = 20
 
+        # Render rating filter checkboxes if Rating column exists
         if "Rating" in df.columns:
             st.markdown(f"**Filter by Rating{label_suffix}:**")
             ratings = sorted(df["Rating"].dropna().unique())

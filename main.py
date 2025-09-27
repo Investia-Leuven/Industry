@@ -1,3 +1,10 @@
+"""
+Main application script for the Investia Sector screening tool.
+This Streamlit app allows users to select sectors and industries,
+view company data based on various metrics, apply filters,
+and upload custom ticker lists for analysis and export.
+"""
+
 import streamlit as st
 import pandas as pd
 from logic import (
@@ -19,11 +26,17 @@ st.set_page_config(page_title="Investia Sector", page_icon="investia_favicon.png
 
 def display_and_export_df(df, title, styled_filename, plain_filename, sheet_name):
     """Sort, style, display, and render download buttons for a DataFrame."""
+    # Apply final sorting and formatting to the DataFrame
     df = apply_final_sorting_and_formatting(df)
+    # Get columns for gradient styling
     gradient_columns, inverse_gradient_columns = get_gradient_columns()
+    # Create a styled DataFrame with gradients applied
     styler = create_styler(df, gradient_columns, inverse_gradient_columns)
+    # Display the title as a subheader
     st.subheader(title)
+    # Render the styled DataFrame in the app
     st.dataframe(styler)
+    # Render buttons to download both styled and plain Excel files
     render_download_buttons(
         df,
         styled_filename=styled_filename,
@@ -34,8 +47,12 @@ def display_and_export_df(df, title, styled_filename, plain_filename, sheet_name
     )
 
 def main():
+    """Main entry point for the Investia Sector screening Streamlit app."""
     def display_header():
-        """Display the app header with logo and title."""
+        """Render the app header with logo, title, and info download button.
+        
+        This header remains sticky and provides branding and quick access
+        to help documentation."""
         st.markdown(
             """
             <style>
@@ -77,7 +94,10 @@ def main():
             with open("help.pdf", "rb") as f:
                 st.download_button(label="info", data=f,file_name="investia_sector_help.pdf", mime="application/pdf", use_container_width=True)
     def display_footer():
-        """Display sticky footer."""
+        """Render a sticky footer with version info and contact details.
+        
+        The footer remains fixed at the bottom of the page, providing
+        legal and contact information for the beta version."""
         st.markdown("""
             <style>
             .footer {
@@ -100,18 +120,19 @@ def main():
             </div>
         """, unsafe_allow_html=True)
 
+    # Render header and footer UI components
     display_header()
     display_footer()
 
-    st.set_page_config(page_title="Investia Sector", layout="wide")
     #st.markdown("## Industry screening - Bèta version")
     st.markdown("")
 
+    # --- Sector selection ---
     # Fetch sector list as name-key dictionary
     sectors_dict = get_available_sectors()
     sector_names = list(sectors_dict.keys())
 
-    # Sector selection
+    # Sector selection radio button
     selected_sector_name = st.radio(
         "### Select a sector:",
         options=["None"] + sector_names,
@@ -138,6 +159,7 @@ def main():
 
             st.success(f"{len(combined_df)} tickers successfully processed from upload.")
 
+            # Render filters for the uploaded data
             cap_range, top_n, selected_ratings = render_filter_ui(combined_df, label_suffix=" (Uploaded)")
             combined_df = apply_filters(combined_df, cap_range, top_n, selected_ratings)
 
@@ -156,6 +178,7 @@ def main():
     # Case 2: A sector is selected -> full logic
     final_df = pd.DataFrame()  # initialise
 
+    # --- Industry selection ---
     selected_sector_key = sectors_dict[selected_sector_name]
     industries_dict = get_industries_for_sector(selected_sector_key)
     industry_names = list(industries_dict.keys())
@@ -176,6 +199,7 @@ def main():
 
     st.success(f"Selected industries: {', '.join(selected_industry_names)}")
 
+    # --- Data type selection ---
     st.markdown("### Select data type to display:")
 
     data_choices = {
@@ -204,12 +228,14 @@ def main():
     selected_data_method = data_choices[selected_label]['value']
     st.caption(data_choices[selected_label]['help'])
 
+    # --- Dataframe combination ---
     final_df = combine_industry_dataframes(selected_industry_names, selected_industry_keys, selected_data_method)
 
     if final_df.empty:
         st.warning("No data available for the selected industries and data method.")
         st.stop()
 
+    # --- Filters ---
     cap_range, top_n, selected_ratings = render_filter_ui(final_df)
     final_df = apply_filters(final_df, cap_range, top_n, selected_ratings)
 
