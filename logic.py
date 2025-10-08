@@ -95,74 +95,72 @@ def combine_industry_dataframes(industry_names, industry_keys, data_method):
 Fetches extended financial data from Yahoo Finance for a list of company tickers.
 Converts currencies to USD, scales to millions, and calculates financial ratios.
 """
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_additional_company_data(df_with_symbols):
     """
     Extends the given DataFrame of companies with additional financial metrics from yfinance.
-    Enriches data by converting currencies to USD using exchange rates, scaling revenue and market cap to millions,
-    and calculating financial ratios such as P/FCF.
-    Returns a DataFrame with columns in the specified order.
+    Converts currencies to USD using live exchange rates fetched only for needed currencies.
+    Scales revenue and market cap to millions and calculates financial ratios.
     """
-
-    # Prepare tickers and fetch info for all
     tickers = df_with_symbols["symbol"].tolist()
     yf_tickers = yf.Tickers(" ".join(tickers)).tickers
     info_dict = {symbol: yf_tickers[symbol].info for symbol in tickers if symbol in yf_tickers}
 
-    # Exchange rates to convert various currencies to USD
-    exchange_rates = {
-        "USD": 1.0,
-        "EUR": 1.1,
-        "GBP": 1.3,
-        "JPY": 0.007,
-        "CAD": 0.75
-    }
+    # --- STEP 1: Detect currencies actually used (excluding USD) ---
+    used_currencies = {info.get("currency", "USD") for info in info_dict.values() if isinstance(info, dict)}
+    used_currencies.discard("USD")  # USD doesn't need conversion
 
+    # --- STEP 2: Fetch only needed FX rates in one batch ---
+    exchange_rates = {"USD": 1.0}
+    if used_currencies:
+        fx_tickers_str = " ".join(f"{cur}=X" for cur in used_currencies)
+        fx_tickers = yf.Tickers(fx_tickers_str).tickers
+        for cur in used_currencies:
+            try:
+                hist = fx_tickers[f"{cur}=X"].history(period="1d")
+                rate = hist["Close"].iloc[-1] if not hist.empty else None
+                exchange_rates[cur] = float(rate) if rate else 1.0
+            except Exception:
+                exchange_rates[cur] = 1.0  # fallback
+
+    # --- STEP 3: Enrich company data ---
     rows = []
-    # Iterate over each company row to enrich data
     for symbol, company_name, industry, market_weight, rating in zip(
-            df_with_symbols["symbol"],
-            df_with_symbols.get("name", pd.Series([None]*len(df_with_symbols))),
-            df_with_symbols.get("Industry", pd.Series([""]*len(df_with_symbols))),
-            df_with_symbols.get("market weight", pd.Series([None]*len(df_with_symbols))),
-            df_with_symbols.get("rating", pd.Series([""]*len(df_with_symbols)))):
-        
+        df_with_symbols["symbol"],
+        df_with_symbols.get("name", pd.Series([None]*len(df_with_symbols))),
+        df_with_symbols.get("Industry", pd.Series([""]*len(df_with_symbols))),
+        df_with_symbols.get("market weight", pd.Series([None]*len(df_with_symbols))),
+        df_with_symbols.get("rating", pd.Series([None]*len(df_with_symbols))),
+    ):
         info = info_dict.get(symbol, {})
-        # Use yfinance shortName if company_name missing
         if not company_name:
             company_name = info.get("shortName", None)
 
         currency = info.get("currency", "USD")
         rate = exchange_rates.get(currency, 1.0)
 
-        # Convert market weight to percentage if present
-        market_weight = market_weight*100 if market_weight is not None else None
+        market_weight = market_weight * 100 if market_weight is not None else None
 
-        # Extract margin metrics, fallback to operatingMargins if ebitMargins missing
         ebit_margin = info.get("ebitMargins") or info.get("operatingMargins")
         gross_margin = info.get("grossMargins")
         ebitda_margin = info.get("ebitdaMargins")
 
-        # Convert margins to percentages
-        gross_margin = gross_margin*100 if gross_margin is not None else None
-        ebit_margin = ebit_margin*100 if ebit_margin is not None else None
-        ebitda_margin = ebitda_margin*100 if ebitda_margin is not None else None
+        gross_margin = gross_margin * 100 if gross_margin is not None else None
+        ebit_margin = ebit_margin * 100 if ebit_margin is not None else None
+        ebitda_margin = ebitda_margin * 100 if ebitda_margin is not None else None
 
-        # Extract financial metrics
         revenue = info.get("totalRevenue")
         market_cap = info.get("marketCap")
         free_cashflow = info.get("freeCashflow")
         enterprise_to_ebitda = info.get("enterpriseToEbitda")
         enterprise_to_revenue = info.get("enterpriseToRevenue")
 
-        # Convert revenue, market cap, free cashflow to millions USD
-        revenue = (revenue*rate/1_000_000) if revenue is not None else None
-        market_cap = (market_cap*rate/1_000_000) if market_cap is not None else None
-        free_cashflow = (free_cashflow*rate/1_000_000) if free_cashflow is not None else None
-        # Calculate Price to Free Cash Flow ratio
-        p_fcf_ratio = (market_cap/free_cashflow) if market_cap and free_cashflow else None
+        # Convert to USD millions
+        revenue = (revenue * rate / 1_000_000) if revenue else None
+        market_cap = (market_cap * rate / 1_000_000) if market_cap else None
+        free_cashflow = (free_cashflow * rate / 1_000_000) if free_cashflow else None
+        p_fcf_ratio = (market_cap / free_cashflow) if (market_cap and free_cashflow) else None
 
-        # Build row dictionary with enriched data
         rows.append({
             "Name": company_name,
             "Ticker": symbol,
@@ -177,13 +175,16 @@ def fetch_additional_company_data(df_with_symbols):
             "P/FCF": p_fcf_ratio,
             "Market Weight (%)": market_weight,
             "Industry": industry,
-            "Rating": rating
+            "Rating": rating,
+            "Currency": currency,
+            "FX Rate (to USD)": rate,
         })
 
     columns = [
-        "Name", "Ticker", "Revenue (M USD)", "Market Cap (M USD)", "Gross Margin (%)",
-        "EBIT Margin (%)", "EBITDA Margin (%)", "P/E", "EV/EBITDA", "EV/Sales",
-        "P/FCF", "Market Weight (%)", "Industry", "Rating"
+        "Name", "Ticker", "Revenue (M USD)", "Market Cap (M USD)",
+        "Gross Margin (%)", "EBIT Margin (%)", "EBITDA Margin (%)",
+        "P/E", "EV/EBITDA", "EV/Sales", "P/FCF",
+        "Market Weight (%)", "Industry", "Rating", "Currency", "FX Rate (to USD)"
     ]
     df = pd.DataFrame(rows, columns=columns)
     return df.round(2)
