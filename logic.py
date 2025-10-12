@@ -11,8 +11,55 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 
+# Global warning suppression for cleaner terminal
+import warnings
+import logging
+warnings.filterwarnings("ignore")
+logging.getLogger("yfinance").setLevel(logging.ERROR)
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+
 # Local imports
+
 from functools import lru_cache
+
+
+# Helper function to fetch live exchange rates for a set of currencies
+@st.cache_data(show_spinner=False)
+def get_live_exchange_rates(currencies):
+    """
+    Fetches live exchange rates to USD for the given set of currency codes using Yahoo Finance.
+    Returns a dictionary mapping each currency to its USD conversion rate.
+    Falls back to 1.0 if fetching fails.
+    """
+    exchange_rates = {"USD": 1.0}
+    non_usd_currencies = [cur for cur in currencies if cur != "USD"]
+
+    if not non_usd_currencies:
+        return exchange_rates
+
+    try:
+        # Fetch all rates in a single batch, e.g. "EURUSD=X GBPUSD=X"
+        fx_tickers_str = " ".join(f"{cur}USD=X" for cur in non_usd_currencies)
+        fx_tickers = yf.Tickers(fx_tickers_str).tickers
+        print("[DEBUG] Fetched tickers:", fx_tickers.keys())
+
+        for cur in non_usd_currencies:
+            ticker_key = f"{cur}USD=X"
+            try:
+                hist = fx_tickers[ticker_key].history(period="1d")
+                if not hist.empty:
+                    exchange_rates[cur] = float(hist["Close"].iloc[-1])
+                else:
+                    exchange_rates[cur] = 1.0
+            except Exception:
+                exchange_rates[cur] = 1.0
+
+    except Exception:
+        # In case of total failure, use all as 1.0
+        for cur in non_usd_currencies:
+            exchange_rates[cur] = 1.0
+
+    return exchange_rates
 
 
 @st.cache_data(show_spinner=False)
@@ -107,16 +154,20 @@ def fetch_additional_company_data(df_with_symbols):
     # Prepare tickers and fetch info for all
     tickers = df_with_symbols["symbol"].tolist()
     yf_tickers = yf.Tickers(" ".join(tickers)).tickers
-    info_dict = {symbol: yf_tickers[symbol].info for symbol in tickers if symbol in yf_tickers}
+    try:
+        info_dict = {symbol: yf_tickers[symbol].info for symbol in tickers if symbol in yf_tickers}
+    except Exception as e:
+        print(f"[WARNING] Some tickers failed to fetch: {e}")
+        info_dict = {}
 
-    # Exchange rates to convert various currencies to USD
-    exchange_rates = {
-        "USD": 1.0,
-        "EUR": 1.1,
-        "GBP": 1.3,
-        "JPY": 0.007,
-        "CAD": 0.75
+    # Detect all currencies used by the fetched companies
+    used_currencies = {
+        info.get("currency", "USD")
+        for info in info_dict.values()
+        if isinstance(info, dict)
     }
+    # Get live exchange rates dynamically
+    exchange_rates = get_live_exchange_rates(used_currencies)
 
     rows = []
     # Iterate over each company row to enrich data
@@ -128,6 +179,8 @@ def fetch_additional_company_data(df_with_symbols):
             df_with_symbols.get("rating", pd.Series([""]*len(df_with_symbols)))):
         
         info = info_dict.get(symbol, {})
+        # Debug log to inspect currency returned by Yahoo Finance
+        print(f"[DEBUG] {symbol}: currency={info.get('currency')}")
         # Use yfinance shortName if company_name missing
         if not company_name:
             company_name = info.get("shortName", None)
@@ -309,11 +362,12 @@ def process_uploaded_tickers(uploaded_file, existing_df):
     # Fetch enriched data for uploaded tickers
     uploaded_data_df = fetch_additional_company_data(df_symbols)
 
-    # Combine with existing data if present
-    if existing_df is not None and not existing_df.empty:
-        combined_df = pd.concat([existing_df, uploaded_data_df], ignore_index=True)
+    # Combine with existing data if present, filtering out empty DataFrames
+    frames = [df for df in [existing_df, uploaded_data_df] if df is not None and not df.empty]
+    if frames:
+        combined_df = pd.concat(frames, ignore_index=True)
     else:
-        combined_df = uploaded_data_df
+        combined_df = pd.DataFrame()
 
     return combined_df, None
 
@@ -411,7 +465,11 @@ def render_filter_ui(df, label_suffix=""):
             rating_cols = st.columns(len(ratings))
             selected_ratings = [
                 rating for col, rating in zip(rating_cols, ratings)
-                if col.checkbox(str(rating), value=True, key=f"{label_suffix}_rating_{rating}")
+                if col.checkbox(
+                    (str(rating) if rating else "Unknown"),
+                    value=True,
+                    key=f"{label_suffix}_rating_{str(rating) if rating else 'Unknown'}"
+                )
             ]
 
     return cap_range, top_n, selected_ratings

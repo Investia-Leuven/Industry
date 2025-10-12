@@ -219,11 +219,12 @@ def main():
 
     radio_labels = list(data_choices.keys())
     selected_label = st.radio(
-        label="",
+        label="Select data type:",
         options=radio_labels,
         format_func=lambda x: x,
         horizontal=True,
-        key="data_choice_radio"
+        key="data_choice_radio",
+        label_visibility="collapsed"
     )
     selected_data_method = data_choices[selected_label]['value']
     st.caption(data_choices[selected_label]['help'])
