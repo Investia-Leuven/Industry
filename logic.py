@@ -7,6 +7,8 @@ Provides functions to fetch, enrich, filter, and style financial data related to
 from io import BytesIO
 
 # Third-party imports
+import time
+import random
 import pandas as pd
 import yfinance as yf
 import streamlit as st
@@ -21,6 +23,24 @@ logging.getLogger("streamlit").setLevel(logging.ERROR)
 # Local imports
 
 from functools import lru_cache
+
+
+def fetch_with_retry(fetch_func, name="data", max_retries=3, base_delay=2):
+    """
+    Executes a fetching function with exponential backoff on "Too Many Requests" errors.
+    """
+    for attempt in range(max_retries):
+        try:
+            return fetch_func()
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "too many requests" in error_msg or "rate limited" in error_msg or "429" in error_msg:
+                if attempt < max_retries - 1:
+                    delay = (base_delay * (2 ** attempt)) + (random.uniform(0, 1))
+                    print(f"[WARNING] {name} fetch rate limited. Retrying in {delay:.2f}s... (Attempt {attempt+1}/{max_retries})")
+                    time.sleep(delay)
+                    continue
+            raise e
 
 
 # Helper function to fetch live exchange rates for a set of currencies
@@ -90,10 +110,14 @@ def get_industries_for_sector(sector_key):
     Used to retrieve industries within a selected sector.
     """
     try:
-        sector = yf.Sector(sector_key)
-        df = sector.industries  # This returns a DataFrame
+        def fetch_sector_industries():
+            sector = yf.Sector(sector_key)
+            return sector.industries
+
+        df = fetch_with_retry(fetch_sector_industries, name=f"Sector '{sector_key}'")
         return dict(zip(df["name"], df.index))
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] Failed to get industries for sector {sector_key}: {e}")
         return {}
 
 
@@ -153,11 +177,35 @@ def fetch_additional_company_data(df_with_symbols):
 
     # Prepare tickers and fetch info for all
     tickers = df_with_symbols["symbol"].tolist()
-    yf_tickers = yf.Tickers(" ".join(tickers)).tickers
+    
+    def fetch_tickers_batch():
+        return yf.Tickers(" ".join(tickers)).tickers
+
     try:
-        info_dict = {symbol: yf_tickers[symbol].info for symbol in tickers if symbol in yf_tickers}
+        yf_tickers_obj = fetch_with_retry(fetch_tickers_batch, name="Tickers batch")
+        if yf_tickers_obj is None:
+            yf_tickers_obj = {}
+        
+        info_dict = {}
+        for symbol in tickers:
+            if symbol in yf_tickers_obj:
+                try:
+                    # Individual .info calls are the most likely to be rate limited
+                    # We wrap each one and add a small delay
+                    res_info = fetch_with_retry(
+                        lambda s=symbol: yf_tickers_obj[s].info, 
+                        name=f"Ticker '{symbol}' info",
+                        max_retries=2
+                    )
+                    info_dict[symbol] = res_info if isinstance(res_info, dict) else {}
+                    
+                    # Small delay between individual info fetches to avoid bursts
+                    if len(tickers) > 5:
+                        time.sleep(0.1)
+                except Exception as ticker_err:
+                    print(f"[WARNING] Failed to fetch info for {symbol}: {ticker_err}")
     except Exception as e:
-        print(f"[WARNING] Some tickers failed to fetch: {e}")
+        print(f"[ERROR] Total failure fetching tickers: {e}")
         info_dict = {}
 
     # Detect all currencies used by the fetched companies
@@ -178,7 +226,7 @@ def fetch_additional_company_data(df_with_symbols):
             df_with_symbols.get("market weight", pd.Series([None]*len(df_with_symbols))),
             df_with_symbols.get("rating", pd.Series([""]*len(df_with_symbols)))):
         
-        info = info_dict.get(symbol, {})
+        info = info_dict.get(symbol) or {}
         # Debug log to inspect currency returned by Yahoo Finance
         print(f"[DEBUG] {symbol}: currency={info.get('currency')}")
         # Use yfinance shortName if company_name missing
