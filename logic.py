@@ -49,7 +49,7 @@ def get_live_exchange_rates(currencies):
     """
     Fetches live exchange rates to USD for the given set of currency codes using Yahoo Finance.
     Returns a dictionary mapping each currency to its USD conversion rate.
-    Falls back to 1.0 if fetching fails.
+    Falls back to None if fetching fails to prevent incorrect comparisons.
     """
     exchange_rates = {"USD": 1.0}
     non_usd_currencies = [cur for cur in currencies if cur != "USD"]
@@ -70,14 +70,14 @@ def get_live_exchange_rates(currencies):
                 if not hist.empty:
                     exchange_rates[cur] = float(hist["Close"].iloc[-1])
                 else:
-                    exchange_rates[cur] = 1.0
+                    exchange_rates[cur] = None
             except Exception:
-                exchange_rates[cur] = 1.0
+                exchange_rates[cur] = None
 
     except Exception:
-        # In case of total failure, use all as 1.0
+        # In case of total failure, mark all as None
         for cur in non_usd_currencies:
-            exchange_rates[cur] = 1.0
+            exchange_rates[cur] = None
 
     return exchange_rates
 
@@ -209,13 +209,34 @@ def fetch_additional_company_data(df_with_symbols):
         info_dict = {}
 
     # Detect all currencies used by the fetched companies
-    used_currencies = {
-        info.get("currency", "USD")
-        for info in info_dict.values()
-        if isinstance(info, dict)
-    }
+    used_currencies = set()
+    for info in info_dict.values():
+        if isinstance(info, dict):
+            curr = info.get("currency", "USD")
+            fin_curr = info.get("financialCurrency", curr)
+            
+            # Normalize fractional currencies to their standard major currency codes
+            # Yahoo reports stock price in minor units for some exchanges, but market cap and financials are in major units.
+            fractional_to_major = {
+                "GBp": "GBP", # British Pence
+                "IEp": "GBP", # Irish Pence (often legacy or LSE listed)
+                "ILA": "ILS", # Israeli Agorot
+                "ZAc": "ZAR"  # South African Cents
+            }
+            curr = fractional_to_major.get(curr, curr)
+            fin_curr = fractional_to_major.get(fin_curr, fin_curr)
+                
+            used_currencies.add(curr)
+            used_currencies.add(fin_curr)
+
     # Get live exchange rates dynamically
     exchange_rates = get_live_exchange_rates(used_currencies)
+    
+    # Identify failed currencies and warn the user
+    failed_currencies = [cur for cur, rate in exchange_rates.items() if rate is None and cur != "USD"]
+    if failed_currencies:
+        st.warning(f"⚠️ Could not fetch exchange rates for: {', '.join(failed_currencies)}. "
+                   "Monetary values for affected companies are hidden to prevent incorrect comparisons.")
 
     rows = []
     # Iterate over each company row to enrich data
@@ -227,14 +248,28 @@ def fetch_additional_company_data(df_with_symbols):
             df_with_symbols.get("rating", pd.Series([""]*len(df_with_symbols)))):
         
         info = info_dict.get(symbol) or {}
+        
+        currency = info.get("currency", "USD")
+        financial_currency = info.get("financialCurrency", currency)
+
         # Debug log to inspect currency returned by Yahoo Finance
-        print(f"[DEBUG] {symbol}: currency={info.get('currency')}")
+        print(f"[DEBUG] {symbol}: currency={currency}, financialCurrency={financial_currency}")
+
         # Use yfinance shortName if company_name missing
         if not company_name:
             company_name = info.get("shortName", None)
 
-        currency = info.get("currency", "USD")
-        rate = exchange_rates.get(currency, 1.0)
+        fractional_to_major = {
+            "GBp": "GBP",
+            "IEp": "GBP",
+            "ILA": "ILS",
+            "ZAc": "ZAR"
+        }
+        currency = fractional_to_major.get(currency, currency)
+        financial_currency = fractional_to_major.get(financial_currency, financial_currency)
+
+        mc_rate = exchange_rates.get(currency)
+        fin_rate = exchange_rates.get(financial_currency)
 
         # Convert market weight to percentage if present
         market_weight = market_weight*100 if market_weight is not None else None
@@ -257,9 +292,18 @@ def fetch_additional_company_data(df_with_symbols):
         enterprise_to_revenue = info.get("enterpriseToRevenue")
 
         # Convert revenue, market cap, free cashflow to millions USD
-        revenue = (revenue*rate/1_000_000) if revenue is not None else None
-        market_cap = (market_cap*rate/1_000_000) if market_cap is not None else None
-        free_cashflow = (free_cashflow*rate/1_000_000) if free_cashflow is not None else None
+        if fin_rate is not None:
+            revenue = (revenue*fin_rate/1_000_000) if revenue is not None else None
+            free_cashflow = (free_cashflow*fin_rate/1_000_000) if free_cashflow is not None else None
+        else:
+            revenue = None
+            free_cashflow = None
+
+        if mc_rate is not None:
+            market_cap = (market_cap*mc_rate/1_000_000) if market_cap is not None else None
+        else:
+            market_cap = None
+            
         # Calculate Price to Free Cash Flow ratio
         p_fcf_ratio = (market_cap/free_cashflow) if market_cap and free_cashflow else None
 
