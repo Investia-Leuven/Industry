@@ -12,6 +12,7 @@ import random
 import pandas as pd
 import yfinance as yf
 import streamlit as st
+import requests
 
 # Global warning suppression for cleaner terminal
 import warnings
@@ -24,6 +25,15 @@ logging.getLogger("streamlit").setLevel(logging.ERROR)
 
 from functools import lru_cache
 
+@st.cache_resource
+def get_session():
+    """Returns a cached requests Session with a browser-like User-Agent."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    })
+    return session
+
 
 def fetch_with_retry(fetch_func, name="data", max_retries=3, base_delay=2):
     """
@@ -33,11 +43,18 @@ def fetch_with_retry(fetch_func, name="data", max_retries=3, base_delay=2):
         try:
             return fetch_func()
         except Exception as e:
+            error_name = type(e).__name__
             error_msg = str(e).lower()
-            if "too many requests" in error_msg or "rate limited" in error_msg or "429" in error_msg:
+            is_rate_limit = any(x in error_msg for x in ["too many requests", "rate limited", "429"]) or "RateLimit" in error_name
+            
+            if is_rate_limit:
                 if attempt < max_retries - 1:
                     delay = (base_delay * (2 ** attempt)) + (random.uniform(0, 1))
-                    print(f"[WARNING] {name} fetch rate limited. Retrying in {delay:.2f}s... (Attempt {attempt+1}/{max_retries})")
+                    # Use st.warning if we are in a streamlit context
+                    try:
+                        st.warning(f"⚠️ {name} rate limited. Retrying in {delay:.1f}s... (Attempt {attempt+1}/{max_retries})")
+                    except Exception:
+                        print(f"[WARNING] {name} rate limited. Retrying in {delay:.2f}s...")
                     time.sleep(delay)
                     continue
             raise e
@@ -110,13 +127,17 @@ def get_industries_for_sector(sector_key):
     Used to retrieve industries within a selected sector.
     """
     try:
+        session = get_session()
         def fetch_sector_industries():
-            sector = yf.Sector(sector_key)
+            sector = yf.Sector(sector_key, session=session)
             return sector.industries
 
         df = fetch_with_retry(fetch_sector_industries, name=f"Sector '{sector_key}'")
+        if df is None or df.empty:
+            return {}
         return dict(zip(df["name"], df.index))
     except Exception as e:
+        st.error(f"Failed to get industries for sector {sector_key}. This may be due to Yahoo Finance rate limits. Please try again in a few minutes.")
         print(f"[ERROR] Failed to get industries for sector {sector_key}: {e}")
         return {}
 
@@ -128,7 +149,8 @@ def get_companies_for_industry(industry_key, data_method):
     Used to fetch company data for a selected industry.
     """
     try:
-        industry = yf.Industry(industry_key)
+        session = get_session()
+        industry = yf.Industry(industry_key, session=session)
         df = getattr(industry, data_method)
         return df
     except Exception:
@@ -177,11 +199,14 @@ def fetch_additional_company_data(df_with_symbols):
 
     # Prepare tickers and fetch info for all
     tickers = df_with_symbols["symbol"].tolist()
+    if not tickers:
+        return pd.DataFrame()
     
     def fetch_tickers_batch():
         return yf.Tickers(" ".join(tickers)).tickers
 
     try:
+        session = get_session()
         yf_tickers_obj = fetch_with_retry(fetch_tickers_batch, name="Tickers batch")
         if yf_tickers_obj is None:
             yf_tickers_obj = {}
@@ -192,16 +217,20 @@ def fetch_additional_company_data(df_with_symbols):
                 try:
                     # Individual .info calls are the most likely to be rate limited
                     # We wrap each one and add a small delay
+                    ticker_obj = yf_tickers_obj[symbol]
+                    # Inject session into individual ticker object if not already there
+                    ticker_obj.session = session 
+                    
                     res_info = fetch_with_retry(
-                        lambda s=symbol: yf_tickers_obj[s].info, 
+                        lambda t=ticker_obj: t.info, 
                         name=f"Ticker '{symbol}' info",
                         max_retries=2
                     )
                     info_dict[symbol] = res_info if isinstance(res_info, dict) else {}
                     
                     # Small delay between individual info fetches to avoid bursts
-                    if len(tickers) > 5:
-                        time.sleep(0.1)
+                    if len(tickers) > 3:
+                        time.sleep(random.uniform(0.2, 0.5))
                 except Exception as ticker_err:
                     print(f"[WARNING] Failed to fetch info for {symbol}: {ticker_err}")
     except Exception as e:
@@ -442,15 +471,9 @@ def process_uploaded_tickers(uploaded_file, existing_df):
     if not tickers:
         return None, "No valid tickers found in uploaded file. Ensure 1 ticker per row."
 
-    # Build names list using yfinance shortName for each ticker
-    names = []
-    yf_tickers = yf.Tickers(" ".join(tickers)).tickers
-    for ticker in tickers:
-        info = yf_tickers.get(ticker, {}).info if ticker in yf_tickers else {}
-        name = info.get("shortName", None)
-        names.append(name)
-
-    df_symbols = pd.DataFrame({"symbol": tickers, "name": names})
+    # We no longer fetch names here to avoid redundant heavy .info calls.
+    # enrichment (fetch_additional_company_data) will handle it more robustly.
+    df_symbols = pd.DataFrame({"symbol": tickers, "name": [None]*len(tickers)})
     # Fetch enriched data for uploaded tickers
     uploaded_data_df = fetch_additional_company_data(df_symbols)
 
