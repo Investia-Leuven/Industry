@@ -23,6 +23,10 @@ logger.setLevel(logging.INFO)
 # Local imports
 
 from functools import lru_cache
+import os
+
+# Optional Proxy Support for Cloud Deployments (Render/AWS)
+PROXY = os.environ.get("YF_PROXY")
 
 # Session management removed to allow yfinance to handle its own curl_cffi sessions
 
@@ -67,9 +71,9 @@ def get_live_exchange_rates(currencies_tuple):
         return exchange_rates
 
     try:
-        # Fetch all rates in a single batch, e.g. "EURUSD=X GBPUSD=X"
+        # Fetch all rates in a single batch
         fx_tickers_str = " ".join(f"{cur}USD=X" for cur in non_usd_currencies)
-        fx_tickers = yf.Tickers(fx_tickers_str).tickers
+        fx_tickers = yf.Tickers(fx_tickers_str, proxy=PROXY).tickers
         print("[DEBUG] Fetched tickers:", fx_tickers.keys())
 
         for cur in non_usd_currencies:
@@ -119,7 +123,7 @@ def get_industries_for_sector(sector_key):
     """
     try:
         def fetch_sector_industries():
-            sector = yf.Sector(sector_key)
+            sector = yf.Sector(sector_key, proxy=PROXY)
             return sector.industries
 
         # We use a higher retry count for the initial sector selection as it's a bottleneck
@@ -139,7 +143,7 @@ def get_companies_for_industry(industry_key, data_method):
     Used to fetch company data for a selected industry.
     """
     try:
-        industry = yf.Industry(industry_key)
+        industry = yf.Industry(industry_key, proxy=PROXY)
         df = getattr(industry, data_method)
         return df
     except Exception:
@@ -192,7 +196,7 @@ def fetch_additional_company_data(df_with_symbols):
         return pd.DataFrame(), []
     
     def fetch_tickers_batch():
-        return yf.Tickers(" ".join(tickers)).tickers
+        return yf.Tickers(" ".join(tickers), proxy=PROXY).tickers
 
     try:
         yf_tickers_obj = fetch_with_retry(fetch_tickers_batch, name="Tickers batch")
@@ -203,16 +207,33 @@ def fetch_additional_company_data(df_with_symbols):
         for symbol in tickers:
             if symbol in yf_tickers_obj:
                 try:
-                    # Individual .info calls are the most likely to be rate limited
-                    # We wrap each one and add a small delay
-                    ticker_obj = yf_tickers_obj[symbol]
+                    # Use fast_info if available for basic metrics, fallback to info
+                    res_info = {}
+                    try:
+                        finfo = ticker_obj.fast_info
+                        res_info = {
+                            "marketCap": finfo.get("marketCap"),
+                            "currency": finfo.get("currency"),
+                            "lastPrice": finfo.get("lastPrice"),
+                            "exchange": finfo.get("exchange"),
+                            "quoteType": finfo.get("quoteType")
+                        }
+                    except:
+                        pass
                     
-                    res_info = fetch_with_retry(
-                        lambda t=ticker_obj: t.info, 
-                        name=f"Ticker '{symbol}' info",
-                        max_retries=2
-                    )
-                    info_dict[symbol] = res_info if isinstance(res_info, dict) else {}
+                    # If we need deeper margins/ratios, we still need .info but we'll be careful
+                    try:
+                        heavy_info = fetch_with_retry(
+                            lambda t=ticker_obj: t.info, 
+                            name=f"Ticker '{symbol}' info",
+                            max_retries=1
+                        )
+                        if isinstance(heavy_info, dict):
+                            res_info.update(heavy_info)
+                    except:
+                        pass
+                    
+                    info_dict[symbol] = res_info
                     
                     # Small delay between individual info fetches to avoid bursts
                     if len(tickers) > 3:
