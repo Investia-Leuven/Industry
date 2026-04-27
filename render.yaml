@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: investia-sector-app
+    env: docker
+    plan: free # or starter
+    region: oregon
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: PYTHONPATH
+        value: .
